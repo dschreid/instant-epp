@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use instant_xml::{FromXml, ToXml};
+use instant_xml::{Accumulate, FromXml, ToXml};
 
 use crate::request::Extension;
 
@@ -24,8 +24,17 @@ impl<'xml> FromXml<'xml> for NoExtension {
         unreachable!()
     }
 
-    type Accumulator = Option<Self>;
+    type Accumulator = NoExtensionAccumulator;
     const KIND: instant_xml::Kind = instant_xml::Kind::Element;
+}
+
+#[derive(Default)]
+pub struct NoExtensionAccumulator;
+
+impl Accumulate<NoExtension> for NoExtensionAccumulator {
+    fn try_done(self, _: &'static str) -> Result<NoExtension, instant_xml::Error> {
+        Ok(NoExtension)
+    }
 }
 
 impl Extension for NoExtension {
