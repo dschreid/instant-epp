@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::time::Duration;
 
 #[cfg(feature = "__rustls")]
@@ -84,6 +85,7 @@ impl EppClient<RustlsConnector> {
         server: (String, u16),
         identity: Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>,
         timeout: Duration,
+        bind: Option<IpAddr>,
     ) -> Result<Self, Error> {
         let builder =
             RustlsConnector::builder(server).map_err(|err| Error::Other(Box::new(err)))?;
@@ -145,7 +147,7 @@ impl<C: Connector> EppClient<C> {
             return Ok(rsp);
         }
 
-        let err = crate::error::Error::Command(Box::new(ResponseStatus {
+        let err = crate::error::Error::Command(response, Box::new(ResponseStatus {
             result: rsp.result,
             tr_ids: rsp.tr_ids,
         }));
@@ -155,8 +157,36 @@ impl<C: Connector> EppClient<C> {
 
     /// Accepts raw EPP XML and returns the raw EPP XML response to it.
     /// Not recommended for direct use but sometimes can be useful for debugging
-    pub async fn transact_xml(&mut self, xml: &str) -> Result<String, Error> {
-        self.connection.transact(xml)?.await
+    pub async fn transact_xml<'c, 'e, Cmd, Ext>(
+        &mut self,
+        xml: &str,
+    ) -> Result<(String, Response<Cmd::Response, Ext::Response>), Error>
+    where
+        Cmd: Transaction<Ext> + Command + 'c,
+        Ext: Extension + 'e,
+    {
+        debug!("{}: request: {}", self.connection.registry, &xml);
+        let response = self.connection.transact(&xml)?.await?;
+        debug!("{}: response: {}", self.connection.registry, &response);
+
+        let rsp = match xml::deserialize::<Response<Cmd::Response, Ext::Response>>(&response) {
+            Ok(rsp) => rsp,
+            Err(e) => {
+                error!(%response, "failed to deserialize response for transaction: {e}");
+                return Err(e);
+            }
+        };
+
+        if rsp.result.code.is_success() {
+            return Ok((response, rsp));
+        }
+
+        let err = crate::error::Error::Command(response, Box::new(ResponseStatus {
+            result: rsp.result,
+            tr_ids: rsp.tr_ids,
+        }));
+
+        Err(err)
     }
 
     /// Returns the greeting received on establishment of the connection in raw xml form
@@ -218,12 +248,15 @@ pub use rustls_connector::RustlsConnector;
 #[cfg(feature = "__rustls")]
 mod rustls_connector {
     use std::io;
+    use std::net::IpAddr;
+    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;
 
     use async_trait::async_trait;
     use rustls_platform_verifier::BuilderVerifierExt;
     use tokio::net::lookup_host;
+    use tokio::net::TcpSocket;
     use tokio::net::TcpStream;
     use tokio_rustls::client::TlsStream;
     use tokio_rustls::rustls::pki_types::InvalidDnsNameError;
@@ -239,6 +272,7 @@ mod rustls_connector {
         inner: TlsConnector,
         server_name: ServerName<'static>,
         server: (String, u16),
+        bind: Option<IpAddr>,
     }
 
     impl RustlsConnector {
@@ -250,6 +284,7 @@ mod rustls_connector {
                 server_name: ServerName::try_from(server.0.as_str())?.to_owned(),
                 server,
                 identity: None,
+                bind: None,
             })
         }
     }
@@ -260,7 +295,17 @@ mod rustls_connector {
 
         async fn connect(&self, timeout: Duration) -> Result<Self::Connection, Error> {
             info!("connecting to server: {}:{}", self.server.0, self.server.1);
-            let addr = match lookup_host(&self.server).await?.next() {
+            let filter_same_ip = |addr: &SocketAddr| {
+                if let Some(bind) = self.bind {
+                    return match bind {
+                        IpAddr::V4(_) => addr.is_ipv4(),
+                        IpAddr::V6(_) => addr.is_ipv6(),
+                    }
+                } else {
+                    return true;
+                }
+            };
+            let addr = match lookup_host(&self.server).await?.filter(filter_same_ip).next() {
                 Some(addr) => addr,
                 None => {
                     return Err(Error::Io(io::Error::new(
@@ -270,7 +315,16 @@ mod rustls_connector {
                 }
             };
 
-            let stream = TcpStream::connect(addr).await?;
+            let socket = match addr {
+                std::net::SocketAddr::V4(_) => TcpSocket::new_v4()?,
+                std::net::SocketAddr::V6(_) => TcpSocket::new_v6()?,
+            };
+
+            if let Some(bind) = self.bind {
+                socket .bind(SocketAddr::new(bind, 0))?
+            }
+
+            let stream = TcpSocket::connect(socket, addr).await?;
             let future = self.inner.connect(self.server_name.clone(), stream);
             connection::timeout(timeout, future).await
         }
@@ -280,6 +334,7 @@ mod rustls_connector {
         server: (String, u16),
         server_name: ServerName<'static>,
         identity: Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>,
+        bind: Option<IpAddr>,
     }
 
     impl RustlsConnectorBuilder {
@@ -295,6 +350,11 @@ mod rustls_connector {
             self
         }
 
+        pub fn bind(mut self, bind: Option<IpAddr>) -> Self {
+            self.bind = bind;
+            self
+        }
+
         /// Use the given `config` for the TLS connector
         ///
         /// Any client authentication set with `client_auth` will be ignored.
@@ -303,12 +363,14 @@ mod rustls_connector {
                 server,
                 server_name,
                 identity: _identity,
+                bind,
             } = self;
 
             RustlsConnector {
                 inner: TlsConnector::from(config),
                 server_name,
                 server,
+                bind,
             }
         }
 
@@ -318,6 +380,7 @@ mod rustls_connector {
                 server,
                 server_name,
                 identity,
+                bind,
             } = self;
 
             let builder = ClientConfig::builder().with_platform_verifier();
@@ -330,6 +393,7 @@ mod rustls_connector {
                 inner: TlsConnector::from(Arc::new(config)),
                 server_name,
                 server,
+                bind,
             })
         }
     }
