@@ -1,4 +1,3 @@
-use std::net::IpAddr;
 use std::time::Duration;
 
 #[cfg(feature = "__rustls")]
@@ -85,7 +84,7 @@ impl EppClient<RustlsConnector> {
         server: (String, u16),
         identity: Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>,
         timeout: Duration,
-        bind: Option<IpAddr>,
+        bind: Option<std::net::IpAddr>,
     ) -> Result<Self, Error> {
         let builder =
             RustlsConnector::builder(server).map_err(|err| Error::Other(Box::new(err)))?;
@@ -93,7 +92,10 @@ impl EppClient<RustlsConnector> {
             Some((certs, key)) => builder.client_auth(certs, key),
             None => builder,
         };
-        let builder = builder.bind(bind);
+        let builder = match bind {
+            Some(bind) => builder.bind(bind),
+            None => builder,
+        };
 
         let connector = builder.build().map_err(|err| Error::Other(Box::new(err)))?;
         Self::new(connector, registry, timeout).await
@@ -351,8 +353,8 @@ mod rustls_connector {
             self
         }
 
-        pub fn bind(mut self, bind: Option<IpAddr>) -> Self {
-            self.bind = bind;
+        pub fn bind(mut self, bind: IpAddr) -> Self {
+            self.bind = Some(bind);
             self
         }
 
