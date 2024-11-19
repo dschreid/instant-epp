@@ -93,6 +93,7 @@ impl EppClient<RustlsConnector> {
             Some((certs, key)) => builder.client_auth(certs, key),
             None => builder,
         };
+        let builder = builder.bind(bind);
 
         let connector = builder.build().map_err(|err| Error::Other(Box::new(err)))?;
         Self::new(connector, registry, timeout).await
@@ -321,7 +322,7 @@ mod rustls_connector {
             };
 
             if let Some(bind) = self.bind {
-                socket .bind(SocketAddr::new(bind, 0))?
+                socket.bind(SocketAddr::new(bind, 0))?
             }
 
             let stream = TcpSocket::connect(socket, addr).await?;
