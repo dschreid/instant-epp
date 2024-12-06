@@ -10,10 +10,12 @@ use std::string::FromUtf8Error;
 
 use crate::response::ResponseStatus;
 
+type RawResponse = String;
+
 /// Error enum holding the possible error types
 #[derive(Debug)]
 pub enum Error {
-    Command(String, Box<ResponseStatus>),
+    Command(RawResponse, Box<ResponseStatus>),
     Io(std::io::Error),
     Timeout,
     Xml(Box<dyn StdError + Send + Sync>),

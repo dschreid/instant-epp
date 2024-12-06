@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::time::Duration;
 
 #[cfg(feature = "__rustls")]
@@ -85,15 +86,20 @@ impl EppClient<RustlsConnector> {
         identity: Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>,
         timeout: Duration,
         bind: Option<std::net::IpAddr>,
+        specific_endpoint: Option<SocketAddr>,
     ) -> Result<Self, Error> {
-        let builder =
-            RustlsConnector::builder(server).map_err(|err| Error::Other(Box::new(err)))?;
+        let builder = RustlsConnector::builder(server).map_err(|err| Error::Other(Box::new(err)))?;
         let builder = match identity {
             Some((certs, key)) => builder.client_auth(certs, key),
             None => builder,
         };
         let builder = match bind {
             Some(bind) => builder.bind(bind),
+            None => builder,
+        };
+
+        let builder = match specific_endpoint {
+            Some(endpoint) => builder.endpoint(endpoint),
             None => builder,
         };
 
@@ -150,20 +156,20 @@ impl<C: Connector> EppClient<C> {
             return Ok(rsp);
         }
 
-        let err = crate::error::Error::Command(response, Box::new(ResponseStatus {
-            result: rsp.result,
-            tr_ids: rsp.tr_ids,
-        }));
+        let err = crate::error::Error::Command(
+            response,
+            Box::new(ResponseStatus {
+                result: rsp.result,
+                tr_ids: rsp.tr_ids,
+            }),
+        );
 
         Err(err)
     }
 
     /// Accepts raw EPP XML and returns the raw EPP XML response to it.
     /// Not recommended for direct use but sometimes can be useful for debugging
-    pub async fn transact_xml<'c, 'e, Cmd, Ext>(
-        &mut self,
-        xml: &str,
-    ) -> Result<(String, Response<Cmd::Response, Ext::Response>), Error>
+    pub async fn transact_xml<'c, 'e, Cmd, Ext>(&mut self, xml: &str) -> Result<(String, Response<Cmd::Response, Ext::Response>), Error>
     where
         Cmd: Transaction<Ext> + Command + 'c,
         Ext: Extension + 'e,
@@ -184,10 +190,13 @@ impl<C: Connector> EppClient<C> {
             return Ok((response, rsp));
         }
 
-        let err = crate::error::Error::Command(response, Box::new(ResponseStatus {
-            result: rsp.result,
-            tr_ids: rsp.tr_ids,
-        }));
+        let err = crate::error::Error::Command(
+            response,
+            Box::new(ResponseStatus {
+                result: rsp.result,
+                tr_ids: rsp.tr_ids,
+            }),
+        );
 
         Err(err)
     }
@@ -219,10 +228,7 @@ pub struct RequestData<'c, 'e, C, E> {
 
 impl<'c, C: Command> From<&'c C> for RequestData<'c, 'static, C, NoExtension> {
     fn from(command: &'c C) -> Self {
-        Self {
-            command,
-            extension: None,
-        }
+        Self { command, extension: None }
     }
 }
 
@@ -266,6 +272,7 @@ mod rustls_connector {
     use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
     use tokio_rustls::rustls::ClientConfig;
     use tokio_rustls::TlsConnector;
+    use tracing::debug;
     use tracing::info;
 
     use crate::connection::{self, Connector};
@@ -276,18 +283,18 @@ mod rustls_connector {
         server_name: ServerName<'static>,
         server: (String, u16),
         bind: Option<IpAddr>,
+        specific_endpoint: Option<SocketAddr>,
     }
 
     impl RustlsConnector {
         /// Create a builder with the given `server` (consisting of a hostname and port)
-        pub fn builder(
-            server: (String, u16),
-        ) -> Result<RustlsConnectorBuilder, InvalidDnsNameError> {
+        pub fn builder(server: (String, u16),) -> Result<RustlsConnectorBuilder, InvalidDnsNameError> {
             Ok(RustlsConnectorBuilder {
                 server_name: ServerName::try_from(server.0.as_str())?.to_owned(),
                 server,
                 identity: None,
                 bind: None,
+                specific_endpoint: None,
             })
         }
     }
@@ -303,19 +310,26 @@ mod rustls_connector {
                     return match bind {
                         IpAddr::V4(_) => addr.is_ipv4(),
                         IpAddr::V6(_) => addr.is_ipv6(),
-                    }
+                    };
                 } else {
                     return true;
                 }
             };
-            let addr = match lookup_host(&self.server).await?.filter(filter_same_ip).next() {
-                Some(addr) => addr,
-                None => {
-                    return Err(Error::Io(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("invalid host: {}", &self.server.0),
-                    )))
-                }
+
+            let addr = match self.specific_endpoint {
+                Some(endpoint) => {
+                    debug!("Using specific endpoint {}", endpoint);
+                    endpoint
+                },
+                None => match lookup_host(&self.server).await?.filter(filter_same_ip).next() {
+                    Some(addr) => addr,
+                    None => {
+                        return Err(Error::Io(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("invalid host: {}", &self.server.0),
+                        )))
+                    }
+                },
             };
 
             let socket = match addr {
@@ -338,23 +352,25 @@ mod rustls_connector {
         server_name: ServerName<'static>,
         identity: Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>,
         bind: Option<IpAddr>,
+        specific_endpoint: Option<SocketAddr>,
     }
 
     impl RustlsConnectorBuilder {
         /// Enable client authentication
         ///
         /// Only used when `build()` is called.
-        pub fn client_auth(
-            mut self,
-            certs: Vec<CertificateDer<'static>>,
-            key: PrivateKeyDer<'static>,
-        ) -> Self {
+        pub fn client_auth(mut self, certs: Vec<CertificateDer<'static>>, key: PrivateKeyDer<'static>) -> Self {
             self.identity = Some((certs, key));
             self
         }
 
         pub fn bind(mut self, bind: IpAddr) -> Self {
             self.bind = Some(bind);
+            self
+        }
+
+        pub fn endpoint(mut self, endpoint: SocketAddr) -> Self {
+            self.specific_endpoint = Some(endpoint);
             self
         }
 
@@ -367,6 +383,7 @@ mod rustls_connector {
                 server_name,
                 identity: _identity,
                 bind,
+                specific_endpoint,
             } = self;
 
             RustlsConnector {
@@ -374,6 +391,7 @@ mod rustls_connector {
                 server_name,
                 server,
                 bind,
+                specific_endpoint
             }
         }
 
@@ -384,6 +402,7 @@ mod rustls_connector {
                 server_name,
                 identity,
                 bind,
+                specific_endpoint,
             } = self;
 
             let builder = ClientConfig::builder().with_platform_verifier();
@@ -397,6 +416,7 @@ mod rustls_connector {
                 server_name,
                 server,
                 bind,
+                specific_endpoint,
             })
         }
     }
