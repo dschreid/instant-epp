@@ -1,10 +1,11 @@
 use instant_xml::{FromXml, ToXml};
 
 use crate::common::{NoExtension, EPP_XMLNS};
+use crate::domain;
 use crate::domain::transfer::TransferData;
 use crate::extensions::low_balance::LowBalance;
 use crate::extensions::rgp::poll::RgpPollData;
-use crate::host::info::InfoData;
+use crate::host;
 use crate::request::{Command, Transaction};
 
 impl Transaction<NoExtension> for Poll {}
@@ -61,14 +62,16 @@ impl ToXml for Ack<'_> {
 
 // Response
 
-/// Type that represents the `<trnData>` tag for message poll response
+/// Type that represents the `<resData>` tag for message poll response
 #[derive(Debug, FromXml)]
 #[xml(forward)]
 pub enum PollData {
     /// Data under the `<domain:trnData>` tag
     DomainTransfer(TransferData),
+    /// Data under the `<domain:infData>` tag
+    DomainInfo(domain::InfoData),
     /// Data under the `<host:infData>` tag
-    HostInfo(InfoData),
+    HostInfo(host::InfoData),
     /// Data under the `<lowbalance>` tag
     LowBalance(LowBalance),
     /// Data under the `<rgp-poll:pollData>` tag
